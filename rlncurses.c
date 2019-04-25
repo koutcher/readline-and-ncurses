@@ -22,6 +22,8 @@
      typeof(b) _b = b;    \
      _a > _b ? _a : _b; })
 
+#define KEY_ESC		27
+
 // Keeps track of the terminal mode so we can reset the terminal if needed on
 // errors
 static bool visual_mode = false;
@@ -165,6 +167,7 @@ static void got_command(char *line)
         msg_win_str = line;
         msg_win_redisplay(false);
     }
+    CHECK(keypad, cmd_win, TRUE);
 }
 
 static void cmd_win_redisplay(bool for_resize)
@@ -229,8 +232,6 @@ static void init_ncurses(void)
     CHECK(noecho);
     CHECK(nonl);
     CHECK(intrflush, NULL, FALSE);
-    // Do not enable keypad() since we want to pass unadulterated input to
-    // readline
 
     // Explicitly specify a "very visible" cursor to make sure it's at least
     // consistent when we turn the cursor on and off (maybe it would make sense
@@ -253,6 +254,10 @@ static void init_ncurses(void)
     }
     if (!msg_win || !sep_win || !cmd_win)
         fail_exit("Failed to allocate windows");
+
+    // Enable keypad(), we will disable it only when we want to pass
+    // unadulterated input to readline
+    CHECK(keypad, cmd_win, TRUE);
 
     // Allow strings longer than the message window and show only the last part
     // if the string doesn't fit
@@ -338,8 +343,53 @@ int main(void)
             resize();
             break;
 
+        // Escape key
+        case KEY_ESC:
+            // See ESCDELAY environment variable in ncurses(3x) to reduce
+            // the one second delay after pressing the escape key
+            if (is_keypad(cmd_win)) {
+                CHECK(mvwaddstr, msg_win, LINES/2-1, COLS/2-7, "Escape pressed!");
+                CHECK(wrefresh, msg_win);
+            }
+            else {
+                // A simple forward_to_readline(c) would be enough here,
+                // but the following code allows the use of the escape
+                // key to cancel readline input
+                int ch;
+                wtimeout(cmd_win, get_escdelay());
+                ch = wgetch(cmd_win);
+                wtimeout(cmd_win, -1);
+                if (ch == ERR) { // Escape key
+                    CHECK(keypad, cmd_win, TRUE);
+                    rl_callback_handler_install("> ", got_command);
+                }
+                else { // Escape sequence
+                    CHECK(ungetch, ch);
+                    forward_to_readline(c);
+                }
+            }
+            break;
+
+        // Arrow keys
+        case KEY_UP:
+        case KEY_DOWN:
+        case KEY_LEFT:
+        case KEY_RIGHT:
+            CHECK(mvwaddstr, msg_win, LINES/2-1, COLS/2-7, "Keypad pressed!");
+            CHECK(wrefresh, msg_win);
+            break;
+
         default:
-            forward_to_readline(c);
+            if (!is_keypad(cmd_win))
+                forward_to_readline(c);
+            else {
+                // For the example all other keys switch off the keypad
+                // mode. You may want to be more selective and also
+                // choose to replace forward_to_readline() with
+                // rl_callback_handler_install() to change the prompt.
+                CHECK(keypad, cmd_win, FALSE);
+                forward_to_readline(c);
+            }
         }
     } while (!should_exit);
 
