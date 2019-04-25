@@ -16,12 +16,14 @@
 #include <string.h>
 #include <wchar.h>
 #include <wctype.h>
+#include <signal.h>
 
 #define max(a, b)         \
   ({ typeof(a) _a = a;    \
      typeof(b) _b = b;    \
      _a > _b ? _a : _b; })
 
+#define KEY_CTL(x)      ((x) & 0x1f) /* KEY_CTL('A') == ^A == \1 */
 #define KEY_ESC		27
 
 // Keeps track of the terminal mode so we can reset the terminal if needed on
@@ -168,6 +170,7 @@ static void got_command(char *line)
         msg_win_redisplay(false);
     }
     CHECK(keypad, cmd_win, TRUE);
+    rl_callback_handler_install(NULL, got_command);
 }
 
 static void cmd_win_redisplay(bool for_resize)
@@ -180,7 +183,7 @@ static void cmd_win_redisplay(bool for_resize)
     // This might write a string wider than the terminal currently, so don't
     // check for errors
     mvwprintw(cmd_win, 0, 0, "%s%s", rl_display_prompt, rl_line_buffer);
-    if (cursor_col >= COLS)
+    if (is_keypad(cmd_win) || cursor_col >= COLS)
         // Hide the cursor if it lies outside the window. Otherwise it'll
         // appear on the very right.
         curs_set(0);
@@ -228,7 +231,7 @@ static void init_ncurses(void)
         CHECK(start_color);
         CHECK(use_default_colors);
     }
-    CHECK(cbreak);
+    CHECK(raw);
     CHECK(noecho);
     CHECK(nonl);
     CHECK(intrflush, NULL, FALSE);
@@ -308,7 +311,7 @@ static void init_readline(void)
     rl_input_available_hook = readline_input_avail;
     rl_redisplay_function = readline_redisplay;
 
-    rl_callback_handler_install("> ", got_command);
+    rl_callback_handler_install(NULL, got_command);
 }
 
 static void deinit_readline(void)
@@ -337,10 +340,21 @@ int main(void)
 
         // Ctrl-L -- redraw screen
         case '\f':
+        case KEY_F(5):
             // Makes the next refresh repaint the screen from scratch
             CHECK(clearok, curscr, TRUE);
             // Resize and reposition windows in case that got messed up somehow
             resize();
+            break;
+
+        // Ctrl-C -- the end
+        case KEY_CTL('C'):
+            should_exit = true;
+            break;
+
+        // Ctrl-Z -- suspend
+        case KEY_CTL('Z'):
+            raise(SIGTSTP);
             break;
 
         // Escape key
@@ -361,7 +375,7 @@ int main(void)
                 wtimeout(cmd_win, -1);
                 if (ch == ERR) { // Escape key
                     CHECK(keypad, cmd_win, TRUE);
-                    rl_callback_handler_install("> ", got_command);
+                    rl_callback_handler_install(NULL, got_command);
                 }
                 else { // Escape sequence
                     CHECK(ungetch, ch);
@@ -382,13 +396,16 @@ int main(void)
         default:
             if (!is_keypad(cmd_win))
                 forward_to_readline(c);
-            else {
-                // For the example all other keys switch off the keypad
-                // mode. You may want to be more selective and also
-                // choose to replace forward_to_readline() with
-                // rl_callback_handler_install() to change the prompt.
+            else if (c == ':') {
                 CHECK(keypad, cmd_win, FALSE);
-                forward_to_readline(c);
+                rl_callback_handler_install(":", got_command);
+            }
+            else if (c == '/') {
+                CHECK(keypad, cmd_win, FALSE);
+                rl_callback_handler_install("/", got_command);
+            }
+            else if (c == 'q') {
+                should_exit = true;
             }
         }
     } while (!should_exit);
